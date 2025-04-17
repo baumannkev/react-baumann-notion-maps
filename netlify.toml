@@ -1,6 +1,10 @@
 [build]
+  # This tells Netlify to run your Next.js build via npm,
+  # which will invoke `next build` from your package.json.
   command   = "npm run build"
+  # Next.js outputs into `.next`
   publish   = ".next"
+  # Plugin will handle your API routes, so you don't need user functions here.
   functions = "netlify/functions"
 
 [[plugins]]
