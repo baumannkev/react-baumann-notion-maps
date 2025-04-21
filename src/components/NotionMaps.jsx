@@ -4,7 +4,35 @@ import { useEffect, useRef } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
-// Fix Leaflet icon URLs under Next.js
+// ─── Polyfill deprecated MouseEvent props ────────────────────────
+if (typeof window !== "undefined" && window.MouseEvent) {
+  const proto = window.MouseEvent.prototype;
+  if (!("mozPressure" in proto)) {
+    Object.defineProperty(proto, "mozPressure", {
+      get() {
+        return this.pressure ?? (this.buttons ? 0.5 : 0);
+      },
+    });
+  }
+  if (!("mozInputSource" in proto)) {
+    Object.defineProperty(proto, "mozInputSource", {
+      get() {
+        switch (this.pointerType) {
+          case "mouse":
+            return 1;
+          case "pen":
+            return 2;
+          case "touch":
+            return 3;
+          default:
+            return 1;
+        }
+      },
+    });
+  }
+}
+
+// ─── Fix Leaflet icon paths under Next.js/Webpack ───────────────
 import markerRetina from "leaflet/dist/images/marker-icon-2x.png";
 import markerDefault from "leaflet/dist/images/marker-icon.png";
 import markerShadow from "leaflet/dist/images/marker-shadow.png";
@@ -14,13 +42,26 @@ L.Icon.Default.mergeOptions({
   shadowUrl:    markerShadow.src,
 });
 
+// ─── Define a red‐colored pin icon ──────────────────────────────
+const redIcon = new L.Icon({
+  iconUrl:
+    "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png",
+  iconRetinaUrl:
+    "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png",
+  shadowUrl: markerShadow.src,
+  iconSize:   [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+  shadowSize: [41, 41],
+});
+
 export default function NotionMaps({ embedDbId }) {
   const mapRef = useRef(null);
   const markerGroupRef = useRef(null);
 
   useEffect(() => {
     async function init() {
-      let currentDbId = embedDbId || null;
+      const currentDbId = embedDbId || null;
       let embedSpots = [];
       let embedMarkers = [];
 
@@ -53,17 +94,15 @@ export default function NotionMaps({ embedDbId }) {
       // ─── Initialize Leaflet once ────────────────────────────────
       function initMap() {
         if (mapRef.current) return;
-        mapRef.current = L.map("map", { zoomControl: false }).setView(
-          [37.7749, -122.4194],
-          12
-        );
+        mapRef.current = L.map("map", { zoomControl: false })
+          .setView([37.7749, -122.4194], 12);
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
           attribution: "&copy; OpenStreetMap contributors",
         }).addTo(mapRef.current);
         markerGroupRef.current = L.featureGroup().addTo(mapRef.current);
       }
 
-      // ─── Fetch pages from Notion ─────────────────────────────────
+      // ─── Fetch all pages for a DB ────────────────────────────────
       async function fetchSpots(dbId) {
         try {
           const res = await fetch(`/api/databases/${dbId}/pages`);
@@ -87,17 +126,23 @@ export default function NotionMaps({ embedDbId }) {
         }
       }
 
-      // ─── Render markers on the map ──────────────────────────────
+      // ─── Render markers on the map (red if Off Market) ─────────
       function renderMarkers(spots) {
         markerGroupRef.current.clearLayers();
-        spots.forEach((s) =>
-          L.marker([s.lat, s.lon])
+        spots.forEach((s) => {
+          // Check Contacted select property
+          const status = s.page.properties.Contacted?.select?.name;
+          const icon = status === "off market" ? redIcon : new L.Icon.Default();
+
+          L.marker([s.lat, s.lon], { icon })
             .addTo(markerGroupRef.current)
-            .bindPopup(`<strong>${s.addr}</strong>`)
-        );
+            .bindPopup(`<strong>${s.addr}</strong>`);
+        });
+
         setTimeout(() => {
           mapRef.current.invalidateSize();
-          if (markerGroupRef.current.getLayers().length) {
+          const layers = markerGroupRef.current.getLayers();
+          if (layers.length) {
             mapRef.current.fitBounds(markerGroupRef.current.getBounds(), {
               padding: [20, 20],
             });
@@ -105,34 +150,73 @@ export default function NotionMaps({ embedDbId }) {
         }, 100);
       }
 
-      // ─── Render embed‐mode sidebar list ─────────────────────────
+      // ─── Render embed‐mode sidebar list ──────────────────────────
       function renderEmbedList() {
         const list = document.getElementById("markerList");
         list.innerHTML = "";
         embedSpots.forEach((s, i) => {
           const item = document.createElement("div");
           item.className = "marker-item";
+
+          // If Off Market, style card red with white text
+          const status = s.page.properties.Contacted?.select?.name;
+          if (status === "off market") {
+            item.style.backgroundColor = "#8B0000";
+            item.style.color = "#FFFFFF";
+          }
+
+          // Basic title/address
           item.innerHTML = `<div class="marker-title">${s.addr}</div>`;
+
+          // Pull out specific props
+          const props = s.page.properties;
+
+          // Link
+          if (props.Link?.url) {
+            item.innerHTML += `
+              <div class="marker-prop">
+                <span class="prop-name">Link:</span>
+                <a href="${props.Link.url}" target="_blank" style="color:inherit; text-decoration:underline;">
+                  ${props.Link.url}
+                </a>
+              </div>`;
+          }
+          // Sqft
+          if (typeof props.Sqft?.number === "number") {
+            item.innerHTML += `
+              <div class="marker-prop">
+                <span class="prop-name">Sqft:</span>
+                ${props.Sqft.number}
+              </div>`;
+          }
+          // Rent ($)
+          if (typeof props["Rent ($)"]?.number === "number") {
+            item.innerHTML += `
+              <div class="marker-prop">
+                <span class="prop-name">Rent ($):</span>
+                $${props["Rent ($)"].number}
+              </div>`;
+          }
+
+          // Click to focus on map
           item.onclick = () => {
             const m = embedMarkers[i];
             mapRef.current.setView(m.getLatLng(), 16);
             m.openPopup();
           };
+
           list.appendChild(item);
         });
       }
 
-      // ─── Embed sidebar toggle ──────────────────────────────────
+      // ─── Toggle embed sidebar ────────────────────────────────────
       document.getElementById("toggleListBtn").onclick = () => {
         const sb = document.querySelector(".embedSidebar");
-        if (sb.style.display === "block") sb.style.display = "none";
-        else {
-          sb.style.display = "block";
-          renderEmbedList();
-        }
+        sb.style.display = sb.style.display === "block" ? "none" : "block";
+        if (sb.style.display === "block") renderEmbedList();
       };
 
-      // ─── Load “My maps” in main mode ─────────────────────────────
+      // ─── Load “My maps” list in main mode ────────────────────────
       async function loadDatabases() {
         try {
           const res = await fetch("/api/databases");
@@ -162,7 +246,7 @@ export default function NotionMaps({ embedDbId }) {
         }
       }
 
-      // ─── Show edit sidebar for a chosen map ─────────────────────
+      // ─── Show edit‐mode sidebar ───────────────────────────────────
       async function openEditView(dbId, dbName) {
         document.getElementById("mapListView").style.display = "none";
         document.getElementById("mapEditView").style.display = "block";
@@ -186,10 +270,10 @@ export default function NotionMaps({ embedDbId }) {
         document.getElementById("locationCount").textContent = spots.length;
       }
 
-      // ─── Kick it all off ────────────────────────────────────────
+      // ─── Bootstrap ───────────────────────────────────────────────
       initMap();
       if (currentDbId) {
-        // embed mode
+        // Embed mode
         embedSpots = await fetchSpots(currentDbId);
         renderMarkers(embedSpots);
         embedMarkers = markerGroupRef.current.getLayers();
@@ -198,7 +282,7 @@ export default function NotionMaps({ embedDbId }) {
         document.querySelector(".topbar").style.display = "none";
         document.querySelector(".embedToolbar").style.display = "flex";
       } else {
-        // main mode
+        // Main (edit) mode
         await loadDatabases();
       }
     }
@@ -208,39 +292,46 @@ export default function NotionMaps({ embedDbId }) {
 
   return (
     <div id="app" className="flex flex-col h-screen">
-      {/* Top bar */}
-      <header className="topbar">
-        <div className="logo">📍 Notion Maps</div>
-        <div className="menu">
-          <button id="menuBtn">☰</button>
-          <div id="dropdown" className="dropdown">
-            <a>🗺️ My maps</a>
-            <a>👤 Account</a>
-            <a>🚪 Logout</a>
+      {/* Top Bar */}
+      <header className="topbar flex justify-between items-center bg-[#202942] p-3">
+        <div className="logo text-lg font-bold">📍 Notion Maps</div>
+        <div className="menu relative">
+          <button id="menuBtn" className="text-2xl">☰</button>
+          <div
+            id="dropdown"
+            className="dropdown absolute right-0 top-10 hidden flex-col bg-[#2f374f] rounded shadow-lg"
+          >
+            <a className="px-4 py-2 hover:bg-[#3e4b6d]">🗺️ My maps</a>
+            <a className="px-4 py-2 hover:bg-[#3e4b6d]">👤 Account</a>
+            <a className="px-4 py-2 hover:bg-[#3e4b6d]">🚪 Logout</a>
           </div>
         </div>
-      </header>  
-      
+      </header>
+
       <div className="container flex flex-1">
-        {/* Main-site sidebar */}
+        {/* Main‑site sidebar */}
         <aside className="sidebar w-80 bg-[#282e3f] p-5 overflow-y-auto">
           <div id="mapListView">
-            <h2 className="text-xl mb-4">My maps</h2>
+            <h2 className="text-xl mb-4 text-white">My maps</h2>
             <div id="mapList"></div>
           </div>
+
           <div id="mapEditView" style={{ display: "none" }}>
             <a href="#" id="goBack" className="text-[#8fa6ff] mb-3 inline-block">
               ← Go back
             </a>
-            <h3 className="text-lg mb-2">Editing map</h3>
+            <h3 className="text-lg mb-2 text-white">Editing map</h3>
+
             <div className="form-group mb-4">
               <label className="block text-[#c7c7d7] mb-1">Select a database</label>
               <select id="dbSelect" disabled className="w-full p-2 rounded bg-[#39405c] text-white"></select>
             </div>
+
             <div className="form-group mb-4">
               <label className="block text-[#c7c7d7] mb-1">Pick a name</label>
-              <input type="text" id="mapName" className="w-full p-2 rounded bg-[#39405c] text-white"/>
+              <input type="text" id="mapName" className="w-full p-2 rounded bg-[#39405c] text-white" />
             </div>
+
             <div className="form-group mb-4">
               <label className="block text-[#c7c7d7] mb-1">Unique map address</label>
               <div className="url-box flex">
@@ -248,38 +339,52 @@ export default function NotionMaps({ embedDbId }) {
                 <button id="copyBtn" className="ml-2 px-4 rounded bg-[#475073] text-white">📋</button>
               </div>
             </div>
+
             <div className="form-group mb-4">
               <label className="block text-[#c7c7d7] mb-1">Locations count</label>
-              <div id="locationCount" className="p-2 bg-[#39405c] rounded text-center">0</div>
+              <div id="locationCount" className="p-2 bg-[#39405c] rounded text-center text-white">0</div>
             </div>
+
             <div className="form-group mb-4">
               <label className="block text-[#c7c7d7] mb-1">Select marker color column</label>
-              <select id="markerColorSelect" className="w-full p-2 rounded bg-[#39405c] text-white"><option value="">None</option></select>
+              <select id="markerColorSelect" className="w-full p-2 rounded bg-[#39405c] text-white">
+                <option value="">None</option>
+              </select>
             </div>
+
             <div className="form-group mb-4">
               <label className="block text-[#c7c7d7] mb-1">Visible columns</label>
               <div id="visibleColumns"></div>
             </div>
-            <button id="saveMap" className="w-full py-2 bg-[#3cb371] rounded font-bold text-white">Save map</button>
+
+            <button id="saveMap" className="w-full py-2 bg-[#3cb371] rounded font-bold text-white">
+              Save map
+            </button>
           </div>
         </aside>
 
-        {/* Embed-mode sidebar */}
-        <aside className="embedSidebar w-80 bg-[#202942] p-5 overflow-y-auto" style={{ display: "none" }}>
-          <h2 className="text-xl mb-2">Map markers</h2>
+        {/* Embed‑mode sidebar */}
+        <aside
+          className="embedSidebar w-80 bg-[#202942] p-5 overflow-y-auto hidden"
+          style={{ display: "none" }}
+        >
+          <h2 className="text-xl mb-2 text-white">Map markers</h2>
           <div className="embed-subtitle text-[#c7c7d7] mb-4">List of all the map markers</div>
           <div id="markerList"></div>
         </aside>
 
         {/* Map panel */}
         <main className="map-panel flex-1 relative">
-          <div className="embedToolbar absolute top-4 left-4 flex flex-col gap-2" style={{ display: "none" }}>
+          <div
+            className="embedToolbar absolute top-4 left-4 flex flex-col gap-2 hidden"
+            style={{ display: "none" }}
+          >
             <button id="toggleListBtn" className="p-2 bg-[#39405c] rounded text-white">≡</button>
             <button className="p-2 bg-[#39405c] rounded text-white">🔍</button>
-            <button className="p-2 bg-[#39405c] rounded text-white">⚙️</button>
-            <button className="p-2 bg-[#39405c] rounded text-white">🗺️</button>
-          </div>
-          <div id="map" className="w-full h-full"></div>
+              <button className="p-2 bg-[#39405c] text-white">⚙️</button>
+              <button className="p-2 bg-[#39405c] text-white">🗺️</button>
+            </div>
+          <div id="map" className="w-full h-full" />
         </main>
       </div>
     </div>
